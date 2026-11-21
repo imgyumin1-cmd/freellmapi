@@ -47,6 +47,8 @@ export interface ThreadsPostOptions {
   productsFile?: string;
   /** CSV of ready-written posts (header: text); one per run, posted verbatim. */
   postsFile?: string;
+  /** Extra provider-specific request fields (e.g. max_completion_tokens). */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface Product {
@@ -89,6 +91,8 @@ export function threadsHelp(): string {
     'real buyer review excerpts, cited as what buyers say) and posts the next',
     'product each run. Progress is kept in FILE.csv.state and only advances after',
     'a successful publish (never on --dry-run). --prompt then sets tone/style.',
+    '--extra-body JSON adds provider-specific request fields, e.g.',
+    '  \'{"max_completion_tokens":800}\' for a provider with a small output limit.',
     '--posts reads a CSV with a header row text and publishes the next post as',
     'written, with no model call and no link, rotating the same way.',
     `Posts longer than ${THREADS_TEXT_LIMIT} characters (emojis count as their UTF-8 bytes) are`,
@@ -217,6 +221,15 @@ export function parsePosts(text: string): string[] {
   return posts;
 }
 
+/** Parse --extra-body: a JSON object of extra request fields. */
+export function parseExtraBody(value: string | undefined): Record<string, unknown> | undefined {
+  if (!value?.trim()) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new Error('--extra-body must be a JSON object'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('--extra-body must be a JSON object');
+  return parsed as Record<string, unknown>;
+}
+
 function statePath(productsFile: string): string {
   return `${productsFile}.state`;
 }
@@ -251,7 +264,8 @@ async function chat(
   const response = await deps.fetch(`${options.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${options.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: options.model ?? 'auto', messages }),
+    // Extra fields first so they can never replace the model or the messages.
+    body: JSON.stringify({ ...options.extraBody, model: options.model ?? 'auto', messages }),
     signal: AbortSignal.timeout(120_000),
   });
   if (!response.ok) {

@@ -373,3 +373,29 @@ describe('buyer reviews', () => {
     expect(body.messages[0].content).toMatch(/never claim to have used the product/);
   });
 });
+
+describe('--extra-body', () => {
+  it('merges provider fields into the chat request without overriding model or messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: string, init: RequestInit = {}) => {
+      const body = JSON.parse(String(init.body));
+      expect(body.max_completion_tokens).toBe(800);
+      expect(body.reasoning_effort).toBe('none');
+      expect(body.model).toBe('qwen/qwen3.8-27b');
+      expect(Array.isArray(body.messages)).toBe(true);
+      return chatReply('짧은 소개');
+    }));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await main(['threads-post', '--url', 'https://api.groq.com/openai/v1', '--api-key', 'k', '--model', 'qwen/qwen3.8-27b',
+        '--extra-body', '{"max_completion_tokens":800,"reasoning_effort":"none","model":"evil","messages":[]}',
+        '--prompt', 'x', '--dry-run']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects anything but a JSON object', async () => {
+    await expect(main(['threads-post', '--api-key', 'k', '--extra-body', '[1]', '--prompt', 'x', '--dry-run'])).rejects.toThrow(/JSON object/);
+    await expect(main(['threads-post', '--api-key', 'k', '--extra-body', 'nope', '--prompt', 'x', '--dry-run'])).rejects.toThrow(/JSON object/);
+  });
+});
