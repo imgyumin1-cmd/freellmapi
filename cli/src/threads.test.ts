@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from './index.js';
 import {
-  THREADS_API, composePost, generatePost, parseCsv, parseProducts, publishText, readNextIndex,
+  THREADS_API, composePost, generatePost, parseCsv, parsePosts, parseProducts, publishText, readNextIndex,
   runThreadsPost, threadsLength, type ThreadsDeps,
 } from './threads.js';
 
@@ -295,5 +295,63 @@ describe('pasted secrets', () => {
       vi.unstubAllGlobals();
     }
     expect(auth).toBe('Bearer gsk_key');
+  });
+});
+
+describe('ready-written posts (--posts)', () => {
+  function postsFile(body = 'text\n"첫 번째 글\n\n두 줄째"\n두 번째 글\n'): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-posts-'));
+    const file = path.join(dir, 'posts.csv');
+    fs.writeFileSync(file, body);
+    return file;
+  }
+
+  it('parses multi-line quoted posts and rejects links, empties and over-long posts', () => {
+    expect(parsePosts('text\n"a\n\nb"\nc\n')).toEqual(['a\n\nb', 'c']);
+    expect(() => parsePosts('body\nx')).toThrow(/'text' column/);
+    expect(() => parsePosts('text\n')).toThrow(/no posts/);
+    expect(() => parsePosts('text\nsee https://x.example')).toThrow(/contains a link/);
+    expect(() => parsePosts(`text\n${'가'.repeat(501)}`)).toThrow(/over the Threads limit/);
+  });
+
+  it('posts verbatim without calling the model, and rotates only after publishing', async () => {
+    const file = postsFile();
+    const preview = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, postsFile: file }, preview);
+    expect(preview.calls).toHaveLength(0);
+    expect(preview.lines.join('\n')).toContain('첫 번째 글\n\n두 줄째');
+    expect(readNextIndex(file)).toBe(0);
+
+    for (const [expected, next] of [['첫 번째 글\n\n두 줄째', 1], ['두 번째 글', 0]] as const) {
+      const run = deps(threadsHandler([]));
+      await runThreadsPost({ ...base, prompt: '', threadsToken: token, postsFile: file }, run);
+      expect(run.calls.some(c => c.url.host === 'localhost:3001')).toBe(false);
+      const create = run.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+      expect(new URLSearchParams(String(create.init.body)).get('text')).toBe(expected);
+      expect(readNextIndex(file)).toBe(next);
+    }
+  });
+
+  it('refuses to mix --posts with generation options', async () => {
+    const file = postsFile();
+    await expect(runThreadsPost({ ...base, dryRun: true, postsFile: file }, deps(threadsHandler([]))))
+      .rejects.toThrow(/cannot be combined/);
+  });
+
+  it('needs no API key from the CLI', async () => {
+    vi.stubEnv('FREELLMAPI_API_KEY', '');
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await expect(main(['threads-post', '--posts', postsFile(), '--dry-run'])).resolves.toBe(0);
+  });
+});
+
+describe('readable formatting', () => {
+  it('asks the model for short, casual, human-sounding lines', async () => {
+    const d = deps(() => chatReply('ok'));
+    await generatePost(base, d);
+    const system = JSON.parse(String(d.calls[0].init.body)).messages[0].content as string;
+    expect(system).toMatch(/line break between thoughts/);
+    expect(system).toMatch(/real person posting casually/);
+    expect(system).toMatch(/hashtags/);
   });
 });
