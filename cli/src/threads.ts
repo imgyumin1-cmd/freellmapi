@@ -53,6 +53,8 @@ export interface Product {
   name: string;
   link: string;
   info: string;
+  /** Real buyer review excerpts the user copied; optional. */
+  reviews?: string;
 }
 
 export interface ThreadsDeps {
@@ -83,7 +85,8 @@ export function threadsHelp(): string {
     '--dry-run prints the generated post and does not publish it.',
     '--link appends a URL as the last line; --disclosure (required with any link)',
     'is placed as the first line. Both are added by the CLI, never by the model.',
-    '--products reads a CSV with a header row name,link,info and posts the next',
+    '--products reads a CSV with a header row name,link,info (optional reviews:',
+    'real buyer review excerpts, cited as what buyers say) and posts the next',
     'product each run. Progress is kept in FILE.csv.state and only advances after',
     'a successful publish (never on --dry-run). --prompt then sets tone/style.',
     '--posts reads a CSV with a header row text and publishes the next post as',
@@ -120,7 +123,10 @@ function systemPrompt(limit: number, affiliate: boolean): string {
     // the disclosure are added by the CLI so the model cannot drop or alter them.
     prompt += ' This post promotes a product. Use only the facts given. Never invent a personal '
       + 'experience, review, rating, price or discount, and never claim to have used the product. '
-      + 'Do not include any URL, link, or advertising disclosure; those are added separately.';
+      + 'Do not include any URL, link, or advertising disclosure; those are added separately. '
+      + 'If buyer reviews are given, you may base the post on them, but only on what they '
+      + 'actually say, and always attribute it to buyers (for example "reviews say ..."), never '
+      + 'as your own experience. Do not add review points that are not in them.';
   }
   return prompt;
 }
@@ -179,10 +185,14 @@ export function parseProducts(text: string): Product[] {
     return at;
   };
   const [nameAt, linkAt, infoAt] = [index('name'), index('link'), index('info')];
+  const reviewsAt = columns.indexOf('reviews'); // optional column
   const products = rows.map((cells, row) => {
     const name = cells[nameAt]?.trim() ?? '';
     if (!name) throw new Error(`Products CSV row ${row + 2} has no name`);
-    return { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
+    const product: Product = { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
+    const reviews = reviewsAt < 0 ? '' : cells[reviewsAt]?.trim() ?? '';
+    if (reviews) product.reviews = reviews;
+    return product;
   });
   if (!products.length) throw new Error('Products CSV has no product rows');
   return products;
@@ -228,6 +238,7 @@ export function productPrompt(product: Product, style?: string): string {
   return [
     `Product: ${product.name}`,
     product.info ? `Facts: ${product.info}` : 'Facts: (none given; describe only what the name states)',
+    ...(product.reviews ? [`Buyer reviews (real, copied from buyers): ${product.reviews}`] : []),
     style?.trim() ? `Style: ${style.trim()}` : 'Style: a short, friendly recommendation in the language of the product name.',
   ].join('\n');
 }

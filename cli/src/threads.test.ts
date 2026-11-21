@@ -355,3 +355,21 @@ describe('readable formatting', () => {
     expect(system).toMatch(/hashtags/);
   });
 });
+
+describe('buyer reviews', () => {
+  it('reads an optional reviews column and passes it as attributed buyer reviews', async () => {
+    expect(parseProducts('name,link,info\nA,https://x.example/a,f')[0].reviews).toBeUndefined();
+    const [product] = parseProducts('name,link,info,reviews\nA,https://x.example/a,f,"따뜻해요, 세탁해도 보풀 없음"');
+    expect(product.reviews).toBe('따뜻해요, 세탁해도 보풀 없음');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-reviews-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info,reviews\n담요,https://link.coupang.com/a/1,극세사,"생각보다 두꺼움, 보풀 적음"\n');
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, d);
+    const body = JSON.parse(String(d.calls[0].init.body));
+    expect(body.messages[1].content).toContain('Buyer reviews (real, copied from buyers): 생각보다 두꺼움, 보풀 적음');
+    expect(body.messages[0].content).toMatch(/always attribute it to buyers/);
+    expect(body.messages[0].content).toMatch(/never claim to have used the product/);
+  });
+});
