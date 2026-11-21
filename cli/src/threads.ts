@@ -24,6 +24,8 @@
 //   Long-lived tokens last 60 days and are refreshed with
 //   GET /refresh_access_token?grant_type=th_refresh_token.
 
+import fs from 'node:fs';
+
 export const THREADS_API = 'https://graph.threads.net/v1.0';
 export const THREADS_TEXT_LIMIT = 500;
 const PUBLISH_WAIT_MS = 30_000;
@@ -37,6 +39,18 @@ export interface ThreadsPostOptions {
   model?: string;
   threadsToken?: string;
   dryRun: boolean;
+  /** Affiliate/product URL appended as the post's last line. */
+  link?: string;
+  /** Advertising disclosure placed as the post's first line. Required with a link. */
+  disclosure?: string;
+  /** CSV of products (name,link,info); one product per run, in rotation. */
+  productsFile?: string;
+}
+
+export interface Product {
+  name: string;
+  link: string;
+  info: string;
 }
 
 export interface ThreadsDeps {
@@ -55,6 +69,8 @@ export function threadsHelp(): string {
   return [
     'Generate a post with the gateway and publish it to Threads:',
     '  freellmapi threads-post --prompt TEXT [--model ID] [--dry-run]',
+    '  freellmapi threads-post --prompt TEXT --link URL --disclosure TEXT',
+    '  freellmapi threads-post --products FILE.csv --disclosure TEXT [--prompt STYLE]',
     '',
     'Environment:',
     '  FREELLMAPI_API_KEY      unified gateway key (or --api-key)',
@@ -62,6 +78,11 @@ export function threadsHelp(): string {
     '                          threads_content_publish (long-lived tokens last 60 days)',
     '',
     '--dry-run prints the generated post and does not publish it.',
+    '--link appends a URL as the last line; --disclosure (required with any link)',
+    'is placed as the first line. Both are added by the CLI, never by the model.',
+    '--products reads a CSV with a header row name,link,info and posts the next',
+    'product each run. Progress is kept in FILE.csv.state and only advances after',
+    'a successful publish (never on --dry-run). --prompt then sets tone/style.',
     `Posts longer than ${THREADS_TEXT_LIMIT} characters (emojis count as their UTF-8 bytes) are`,
     'sent back to the model once to shorten; still too long and nothing is posted.',
   ].join('\n');
@@ -79,9 +100,105 @@ export function threadsLength(text: string): number {
   return length;
 }
 
-function systemPrompt(limit: number): string {
-  return `You write a single Threads post. Reply with the post text only: no preamble, `
+function systemPrompt(limit: number, affiliate: boolean): string {
+  let prompt = `You write a single Threads post. Reply with the post text only: no preamble, `
     + `no quotes around it, no explanation. Keep it under ${limit} characters.`;
+  if (affiliate) {
+    // Fabricated first-person reviews are deceptive advertising; the link and
+    // the disclosure are added by the CLI so the model cannot drop or alter them.
+    prompt += ' This post promotes a product. Use only the facts given. Never invent a personal '
+      + 'experience, review, rating, price or discount, and never claim to have used the product. '
+      + 'Do not include any URL, link, or advertising disclosure; those are added separately.';
+  }
+  return prompt;
+}
+
+const URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.\S+/gi;
+
+/** Disclosure first (so it is seen), body, link last. */
+export function composePost(body: string, link?: string, disclosure?: string): string {
+  return [disclosure?.trim(), body.trim(), link?.trim()].filter(Boolean).join('\n\n');
+}
+
+/** Characters the CLI adds around the generated body. */
+export function reservedLength(link?: string, disclosure?: string): number {
+  const fixed = composePost('', link, disclosure);
+  return fixed ? threadsLength(fixed) + 2 : 0;
+}
+
+function validateLink(link: string): string {
+  let url: URL;
+  try { url = new URL(link.trim()); } catch { throw new Error(`Not a valid link: '${link}'`); }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(`Link must be http(s): '${link}'`);
+  return url.href;
+}
+
+/** Minimal RFC 4180 CSV parser: quoted fields, doubled quotes, CRLF. */
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  const input = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (quoted) {
+      if (char === '"' && input[i + 1] === '"') { field += '"'; i += 1; }
+      else if (char === '"') quoted = false;
+      else field += char;
+    } else if (char === '"' && field === '') quoted = true;
+    else if (char === ',') { row.push(field); field = ''; }
+    else if (char === '\n' || char === '\r') {
+      if (char === '\r' && input[i + 1] === '\n') i += 1;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += char;
+  }
+  if (quoted) throw new Error('CSV has an unterminated quoted field');
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(cells => cells.some(cell => cell.trim() !== ''));
+}
+
+export function parseProducts(text: string): Product[] {
+  const [header, ...rows] = parseCsv(text);
+  const columns = (header ?? []).map(cell => cell.trim().toLowerCase());
+  const index = (name: string): number => {
+    const at = columns.indexOf(name);
+    if (at < 0) throw new Error(`Products CSV needs a header row with name,link,info (missing '${name}')`);
+    return at;
+  };
+  const [nameAt, linkAt, infoAt] = [index('name'), index('link'), index('info')];
+  const products = rows.map((cells, row) => {
+    const name = cells[nameAt]?.trim() ?? '';
+    if (!name) throw new Error(`Products CSV row ${row + 2} has no name`);
+    return { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
+  });
+  if (!products.length) throw new Error('Products CSV has no product rows');
+  return products;
+}
+
+function statePath(productsFile: string): string {
+  return `${productsFile}.state`;
+}
+
+export function readNextIndex(productsFile: string): number {
+  try {
+    const next = Number((JSON.parse(fs.readFileSync(statePath(productsFile), 'utf8')) as { next?: unknown }).next);
+    return Number.isSafeInteger(next) && next >= 0 ? next : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function writeNextIndex(productsFile: string, next: number): void {
+  fs.writeFileSync(statePath(productsFile), `${JSON.stringify({ next })}\n`);
+}
+
+export function productPrompt(product: Product, style?: string): string {
+  return [
+    `Product: ${product.name}`,
+    product.info ? `Facts: ${product.info}` : 'Facts: (none given; describe only what the name states)',
+    style?.trim() ? `Style: ${style.trim()}` : 'Style: a short, friendly recommendation in the language of the product name.',
+  ].join('\n');
 }
 
 async function chat(
@@ -106,22 +223,33 @@ async function chat(
 
 /** Ask the gateway for a post, and once more to shorten it if it is over the
  *  Threads limit. Throws rather than truncating mid-sentence. */
-export async function generatePost(options: ThreadsPostOptions, deps: ThreadsDeps = defaultDeps): Promise<string> {
+export async function generatePost(
+  options: ThreadsPostOptions,
+  deps: ThreadsDeps = defaultDeps,
+  reserved = 0,
+  affiliate = false,
+): Promise<string> {
+  const limit = THREADS_TEXT_LIMIT - reserved;
   // Leave headroom: models count characters loosely and emojis cost bytes.
-  const target = THREADS_TEXT_LIMIT - 50;
+  const target = limit - 50;
+  if (target < 50) {
+    throw new Error(`The link and disclosure take ${reserved} of ${THREADS_TEXT_LIMIT} characters, leaving no room for a post.`);
+  }
+  const clean = (text: string): string => (affiliate ? text.replace(URL_PATTERN, '').replace(/[ \t]+\n/g, '\n').trim() : text);
   const messages = [
-    { role: 'system', content: systemPrompt(target) },
+    { role: 'system', content: systemPrompt(target, affiliate) },
     { role: 'user', content: options.prompt },
   ];
-  let text = await chat(options, messages, deps);
-  if (threadsLength(text) > THREADS_TEXT_LIMIT) {
-    text = await chat(options, [
+  let text = clean(await chat(options, messages, deps));
+  if (threadsLength(text) > limit) {
+    text = clean(await chat(options, [
       ...messages,
       { role: 'assistant', content: text },
       { role: 'user', content: `That is ${threadsLength(text)} characters. Rewrite it under ${target} characters.` },
-    ], deps);
+    ], deps));
   }
-  const length = threadsLength(text);
+  if (!text) throw new Error('The gateway returned an empty post');
+  const length = threadsLength(text) + reserved;
   if (length > THREADS_TEXT_LIMIT) {
     throw new Error(`The generated post is ${length} characters, over the Threads limit of ${THREADS_TEXT_LIMIT}. Nothing was posted.`);
   }
@@ -184,11 +312,30 @@ export async function publishText(token: string, text: string, deps: ThreadsDeps
 }
 
 export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsDeps = defaultDeps): Promise<number> {
-  if (!options.prompt.trim()) throw new Error('threads-post requires --prompt');
+  let { prompt, link } = options;
+  let product: { file: string; next: number; total: number; item: Product } | undefined;
+  if (options.productsFile) {
+    if (options.link) throw new Error('--link and --products cannot be combined; each product row has its own link');
+    const products = parseProducts(fs.readFileSync(options.productsFile, 'utf8'));
+    const next = readNextIndex(options.productsFile);
+    const item = products[next % products.length];
+    product = { file: options.productsFile, next, total: products.length, item };
+    prompt = productPrompt(item, options.prompt);
+    link = item.link;
+  } else if (!prompt.trim()) {
+    throw new Error('threads-post requires --prompt (or --products)');
+  }
+  if (link) link = validateLink(link);
+  const disclosure = options.disclosure?.trim() || undefined;
+  if (link && !disclosure) {
+    throw new Error('A post with a link must carry an advertising disclosure: pass --disclosure TEXT.');
+  }
   if (!options.dryRun && !options.threadsToken) {
     throw new Error('Set THREADS_ACCESS_TOKEN to a Threads user access token (or pass --dry-run to only generate).');
   }
-  const text = await generatePost(options, deps);
+  if (product) deps.log(`Product ${(product.next % product.total) + 1}/${product.total}: ${product.item.name}\n`);
+  const body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+  const text = composePost(body, link, disclosure);
   deps.log(text);
   if (options.dryRun) {
     deps.log(`\n(dry run: ${threadsLength(text)}/${THREADS_TEXT_LIMIT} characters, not posted)`);
@@ -196,5 +343,6 @@ export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsD
   }
   const id = await publishText(options.threadsToken!, text, deps);
   deps.log(`\nPublished to Threads (media id ${id})`);
+  if (product) writeNextIndex(product.file, (product.next + 1) % product.total);
   return 0;
 }

@@ -1,7 +1,11 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from './index.js';
 import {
-  THREADS_API, generatePost, publishText, runThreadsPost, threadsLength, type ThreadsDeps,
+  THREADS_API, composePost, generatePost, parseCsv, parseProducts, publishText, readNextIndex,
+  runThreadsPost, threadsLength, type ThreadsDeps,
 } from './threads.js';
 
 const token = 'threads-secret-token';
@@ -154,5 +158,104 @@ describe('CLI wiring', () => {
     vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { output += String(chunk); return true; });
     await main(['threads-post', '--help']);
     expect(output).toContain('THREADS_ACCESS_TOKEN');
+  });
+});
+
+const disclosure = '이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.';
+
+describe('affiliate posts', () => {
+  it('puts the disclosure first and the link last, and strips model URLs', async () => {
+    const handler = threadsHandler([]);
+    const d = deps((url, init) => (url.host === 'localhost:3001'
+      ? chatReply('좋은 청소기 https://evil.example/x 입니다')
+      : handler(url, init)));
+    await runThreadsPost({ ...base, threadsToken: token, link: 'https://link.coupang.com/a/abc', disclosure }, d);
+    const create = d.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+    const text = new URLSearchParams(String(create.init.body)).get('text')!;
+    expect(text.startsWith(disclosure)).toBe(true);
+    expect(text.endsWith('https://link.coupang.com/a/abc')).toBe(true);
+    expect(text).not.toContain('evil.example');
+    const system = JSON.parse(String(d.calls[0].init.body)).messages[0].content as string;
+    expect(system).toMatch(/Never invent a personal experience/);
+  });
+
+  it('refuses a link without a disclosure', async () => {
+    const d = deps(threadsHandler([]));
+    await expect(runThreadsPost({ ...base, dryRun: true, link: 'https://link.coupang.com/a/abc' }, d))
+      .rejects.toThrow(/advertising disclosure/);
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it('rejects a non-http link', async () => {
+    const d = deps(threadsHandler([]));
+    await expect(runThreadsPost({ ...base, dryRun: true, link: 'javascript:alert(1)', disclosure }, d))
+      .rejects.toThrow(/http\(s\)/);
+  });
+
+  it('keeps the whole post within 500 characters', async () => {
+    const replies = ['가'.repeat(480), '짧은 소개'];
+    const d = deps(() => chatReply(replies.shift()!));
+    const body = await generatePost(base, d, 120, true);
+    expect(body).toBe('짧은 소개');
+    expect(threadsLength(composePost(body, 'https://a.example/x', disclosure))).toBeLessThanOrEqual(500);
+  });
+});
+
+describe('CSV products', () => {
+  it('parses quoted fields, doubled quotes, CRLF and a BOM', () => {
+    expect(parseCsv('﻿name,link,info\r\n"A, B",https://x.example,"say ""hi"""\r\n\r\n'))
+      .toEqual([['name', 'link', 'info'], ['A, B', 'https://x.example', 'say "hi"']]);
+  });
+
+  it('requires the header columns and valid links', () => {
+    expect(() => parseProducts('title,link\nA,https://x.example')).toThrow(/missing 'name'/);
+    expect(() => parseProducts('name,link,info\nA,not a url,x')).toThrow(/Not a valid link/);
+    expect(() => parseProducts('name,link,info\n')).toThrow(/no product rows/);
+    expect(parseProducts('Info,LINK,name\nfacts,https://x.example/p,청소기'))
+      .toEqual([{ name: '청소기', link: 'https://x.example/p', info: 'facts' }]);
+  });
+
+  function productsFile(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-products-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info\n청소기 A,https://link.coupang.com/a/1,무게 1.2kg\n텀블러 B,https://link.coupang.com/a/2,보온 12시간\n');
+    return file;
+  }
+
+  it('posts products in rotation and advances only after publishing', async () => {
+    const file = productsFile();
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, d);
+    expect(readNextIndex(file)).toBe(0);
+    expect(JSON.parse(String(d.calls[0].init.body)).messages[1].content).toContain('청소기 A');
+
+    for (const [expected, next] of [['https://link.coupang.com/a/1', 1], ['https://link.coupang.com/a/2', 0]] as const) {
+      const run = deps(threadsHandler([]));
+      await runThreadsPost({ ...base, prompt: '', threadsToken: token, productsFile: file, disclosure }, run);
+      const create = run.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+      expect(new URLSearchParams(String(create.init.body)).get('text')).toContain(expected);
+      expect(readNextIndex(file)).toBe(next);
+    }
+  });
+
+  it('does not advance when publishing fails', async () => {
+    const file = productsFile();
+    const d = deps(threadsHandler(['ERROR']));
+    await expect(runThreadsPost({ ...base, prompt: '', threadsToken: token, productsFile: file, disclosure }, d))
+      .rejects.toThrow(/ERROR/);
+    expect(readNextIndex(file)).toBe(0);
+  });
+
+  it('requires a disclosure and rejects --link alongside --products', async () => {
+    const file = productsFile();
+    await expect(runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file }, deps(threadsHandler([]))))
+      .rejects.toThrow(/advertising disclosure/);
+    await expect(runThreadsPost({ ...base, dryRun: true, productsFile: file, disclosure, link: 'https://x.example' }, deps(threadsHandler([]))))
+      .rejects.toThrow(/cannot be combined/);
+  });
+
+  it('accepts the new flags only on threads-post', async () => {
+    await expect(main(['list', '--products', 'x.csv'])).rejects.toThrow(/--products is only supported by threads-post/);
+    await expect(main(['list', '--link', 'https://x.example'])).rejects.toThrow(/--link is only supported/);
   });
 });

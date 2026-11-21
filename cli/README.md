@@ -76,6 +76,40 @@ freellmapi threads-post --prompt "Write a short tip about home coffee brewing"
 - Long-lived Threads tokens expire after 60 days. Refresh one before then with
   `GET https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=...`.
 
+### Affiliate links and a product list
+
+`--link URL` adds a link as the post's last line. `--disclosure TEXT` adds an
+advertising disclosure as the first line, and any post with a link requires it.
+The CLI adds both itself, so the model cannot leave them out or change them. For
+affiliate posts the model is told to use only the facts you give it and never to
+invent a personal experience, review, price or discount. Any URL the model writes
+is removed, so your link is the only one in the post (Threads previews the first
+URL in a post).
+
+```bash
+freellmapi threads-post --prompt "Introduce cordless vacuum A: 1.2 kg, 40 min battery" \
+  --link "https://link.coupang.com/a/xxxx" \
+  --disclosure "<the disclosure wording your affiliate programme requires>"
+```
+
+`--products FILE.csv` posts one product per run, in order. The CSV needs a
+`name,link,info` header row. `info` holds the facts the post may use:
+
+```csv
+name,link,info
+Cordless vacuum A,https://link.coupang.com/a/xxxx,"1.2 kg, 40 min battery"
+Tumbler B,https://link.coupang.com/a/yyyy,keeps drinks hot for 12 hours
+```
+
+```bash
+freellmapi threads-post --products products.csv --disclosure "..." --prompt "friendly, in Korean"
+```
+
+The next product to post is stored in `FILE.csv.state`. It moves forward only after
+a successful publish, never on `--dry-run`, and starts again from the top after the
+last row. Check your own disclosure obligations and your affiliate programme's terms
+before you post.
+
 To post on a schedule, run it from cron on the machine where the gateway runs.
 For example, every day at 09:00:
 

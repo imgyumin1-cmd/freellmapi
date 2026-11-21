@@ -20,6 +20,9 @@ interface CliOptions extends KeyCommandOptions {
   profile: string;
   model?: string;
   prompt?: string;
+  link?: string;
+  disclosure?: string;
+  products?: string;
 }
 
 function rootUrl(url: string): string {
@@ -85,7 +88,7 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       flag === '--url' || flag === '--api-key' || flag === '--profile'
       || flag === '--model' || flag === '--timeout'
       || flag === '--token' || flag === '--key' || flag === '--id'
-      || flag === '--prompt'
+      || flag === '--prompt' || flag === '--link' || flag === '--disclosure' || flag === '--products'
     ) {
       if (inline === undefined) index += 1;
       if (!value || (inline === undefined && value.startsWith('-'))) {
@@ -98,6 +101,9 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       else if (flag === '--token') options.token = value;
       else if (flag === '--key') options.key = value;
       else if (flag === '--prompt') options.prompt = value;
+      else if (flag === '--link') options.link = value;
+      else if (flag === '--disclosure') options.disclosure = value;
+      else if (flag === '--products') options.products = value;
       else if (flag === '--id') {
         if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
           throw new Error('--id must be a positive integer');
@@ -474,8 +480,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (command === 'keys' && ['--api-key', '--profile', '--model'].includes(flag)) {
       throw new Error(`${flag} is not supported by keys; use keys --help for available options`);
     }
-    if (command !== 'threads-post' && flag === '--prompt') {
-      throw new Error('--prompt is only supported by threads-post');
+    if (command !== 'threads-post' && ['--prompt', '--link', '--disclosure', '--products'].includes(flag)) {
+      throw new Error(`${flag} is only supported by threads-post`);
     }
   }
   if (command === 'keys') return runKeys(options, () => promptForKey(true));
@@ -494,6 +500,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       model: options.model,
       threadsToken: process.env.THREADS_ACCESS_TOKEN?.trim() || undefined,
       dryRun: options.dryRun,
+      link: options.link,
+      disclosure: options.disclosure,
+      productsFile: options.products,
     });
   }
   if (command === 'list') {
