@@ -64,9 +64,17 @@ jobs:
           # (console.groq.com/docs/openai and /docs/rate-limits, checked 2026-11-21).
           LLM_URL: ${{ vars.LLM_URL || 'https://api.groq.com/openai/v1' }}
           LLM_MODEL: ${{ vars.LLM_MODEL || 'openai/gpt-oss-120b' }}
+          LLM_EXTRA_BODY: ${{ vars.LLM_EXTRA_BODY }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           args=(threads-post --url "$LLM_URL" --model "$LLM_MODEL" --products threads/products.csv --disclosure "$DISCLOSURE")
+          # Groq's free plan caps Qwen 3.8 at 1K output tokens per minute and an
+          # unset limit is rejected; reasoning_effort "none" skips thinking tokens
+          # (console.groq.com/docs/rate-limits and /docs/reasoning, checked 2026-11-21).
+          if [ -z "$LLM_EXTRA_BODY" ] && [[ "$LLM_MODEL" == qwen/* ]]; then
+            LLM_EXTRA_BODY='{"max_completion_tokens":800,"reasoning_effort":"none"}'
+          fi
+          if [ -n "$LLM_EXTRA_BODY" ]; then args+=(--extra-body "$LLM_EXTRA_BODY"); fi
           if [ -n "$STYLE" ]; then args+=(--prompt "$STYLE"); fi
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           node cli/dist/index.js "${args[@]}"
@@ -79,4 +87,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'threads: advance product rotation [skip ci]'
+          git pull --rebase
           git push

@@ -45,12 +45,20 @@ export interface ThreadsPostOptions {
   disclosure?: string;
   /** CSV of products (name,link,info); one product per run, in rotation. */
   productsFile?: string;
+  /** CSV of ready-written posts (header: text); one per run, posted verbatim. */
+  postsFile?: string;
+  /** Extra provider-specific request fields (e.g. max_completion_tokens). */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface Product {
   name: string;
   link: string;
   info: string;
+  /** Real buyer review excerpts the user copied; optional. */
+  reviews?: string;
+  /** Ready-written post body; when set it is used as is, with no model call. */
+  post?: string;
 }
 
 export interface ThreadsDeps {
@@ -71,6 +79,7 @@ export function threadsHelp(): string {
     '  freellmapi threads-post --prompt TEXT [--model ID] [--dry-run]',
     '  freellmapi threads-post --prompt TEXT --link URL --disclosure TEXT',
     '  freellmapi threads-post --products FILE.csv --disclosure TEXT [--prompt STYLE]',
+    '  freellmapi threads-post --posts FILE.csv',
     '',
     'Environment:',
     '  FREELLMAPI_API_KEY      unified gateway key (or --api-key)',
@@ -80,9 +89,15 @@ export function threadsHelp(): string {
     '--dry-run prints the generated post and does not publish it.',
     '--link appends a URL as the last line; --disclosure (required with any link)',
     'is placed as the first line. Both are added by the CLI, never by the model.',
-    '--products reads a CSV with a header row name,link,info and posts the next',
+    '--products reads a CSV with a header row name,link,info (optional reviews:',
+    'real buyer review excerpts, cited as what buyers say; optional post: a',
+    'ready-written body used as is instead of generating one) and posts the next',
     'product each run. Progress is kept in FILE.csv.state and only advances after',
     'a successful publish (never on --dry-run). --prompt then sets tone/style.',
+    '--extra-body JSON adds provider-specific request fields, e.g.',
+    '  \'{"max_completion_tokens":800}\' for a provider with a small output limit.',
+    '--posts reads a CSV with a header row text and publishes the next post as',
+    'written, with no model call and no link, rotating the same way.',
     `Posts longer than ${THREADS_TEXT_LIMIT} characters (emojis count as their UTF-8 bytes) are`,
     'sent back to the model once to shorten; still too long and nothing is posted.',
   ].join('\n');
@@ -102,13 +117,23 @@ export function threadsLength(text: string): number {
 
 function systemPrompt(limit: number, affiliate: boolean): string {
   let prompt = `You write a single Threads post. Reply with the post text only: no preamble, `
-    + `no quotes around it, no explanation. Keep it under ${limit} characters.`;
+    + `no quotes around it, no explanation. Keep it under ${limit} characters. `
+    // Easy to read on a phone, and written the way a person posts casually
+    // rather than like ad copy.
+    + 'Make it easy to read on a phone: a few short lines, with a line break between thoughts. '
+    + 'Write like a real person posting casually: plain everyday words, sentences of uneven '
+    + 'length, fragments are fine. Avoid marketing clichés and superlatives, exclamation marks '
+    + 'in a row, perfectly parallel lists or bullet points, hashtags, em dashes, and a closing '
+    + 'sales call to action. At most 1 emoji, and only if it fits naturally.';
   if (affiliate) {
     // Fabricated first-person reviews are deceptive advertising; the link and
     // the disclosure are added by the CLI so the model cannot drop or alter them.
     prompt += ' This post promotes a product. Use only the facts given. Never invent a personal '
       + 'experience, review, rating, price or discount, and never claim to have used the product. '
-      + 'Do not include any URL, link, or advertising disclosure; those are added separately.';
+      + 'Do not include any URL, link, or advertising disclosure; those are added separately. '
+      + 'If buyer reviews are given, you may base the post on them, but only on what they '
+      + 'actually say, and always attribute it to buyers (for example "reviews say ..."), never '
+      + 'as your own experience. Do not add review points that are not in them.';
   }
   return prompt;
 }
@@ -167,13 +192,54 @@ export function parseProducts(text: string): Product[] {
     return at;
   };
   const [nameAt, linkAt, infoAt] = [index('name'), index('link'), index('info')];
+  const reviewsAt = columns.indexOf('reviews'); // optional column
+  const postAt = columns.indexOf('post'); // optional column
   const products = rows.map((cells, row) => {
     const name = cells[nameAt]?.trim() ?? '';
     if (!name) throw new Error(`Products CSV row ${row + 2} has no name`);
-    return { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
+    const product: Product = { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
+    const reviews = reviewsAt < 0 ? '' : cells[reviewsAt]?.trim() ?? '';
+    if (reviews) product.reviews = reviews;
+    const post = postAt < 0 ? '' : (cells[postAt] ?? '').replace(/\r\n/g, '\n').trim();
+    if (post) {
+      if (URL_PATTERN.test(post)) {
+        URL_PATTERN.lastIndex = 0;
+        throw new Error(`Products CSV row ${row + 2}: the post must not contain a link; the link column is added automatically`);
+      }
+      product.post = post;
+    }
+    return product;
   });
   if (!products.length) throw new Error('Products CSV has no product rows');
   return products;
+}
+
+/** Ready-written posts: a CSV whose header row has a `text` column. */
+export function parsePosts(text: string): string[] {
+  const [header, ...rows] = parseCsv(text);
+  const at = (header ?? []).map(cell => cell.trim().toLowerCase()).indexOf('text');
+  if (at < 0) throw new Error("Posts CSV needs a header row with a 'text' column");
+  const posts = rows.map(cells => (cells[at] ?? '').replace(/\r\n/g, '\n').trim()).filter(Boolean);
+  if (!posts.length) throw new Error('Posts CSV has no posts');
+  posts.forEach((post, index) => {
+    if (threadsLength(post) > THREADS_TEXT_LIMIT) {
+      throw new Error(`Post ${index + 1} is ${threadsLength(post)} characters, over the Threads limit of ${THREADS_TEXT_LIMIT}`);
+    }
+    if (URL_PATTERN.test(post)) {
+      URL_PATTERN.lastIndex = 0;
+      throw new Error(`Post ${index + 1} contains a link; ready-written posts are for posts without links`);
+    }
+  });
+  return posts;
+}
+
+/** Parse --extra-body: a JSON object of extra request fields. */
+export function parseExtraBody(value: string | undefined): Record<string, unknown> | undefined {
+  if (!value?.trim()) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new Error('--extra-body must be a JSON object'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('--extra-body must be a JSON object');
+  return parsed as Record<string, unknown>;
 }
 
 function statePath(productsFile: string): string {
@@ -197,6 +263,7 @@ export function productPrompt(product: Product, style?: string): string {
   return [
     `Product: ${product.name}`,
     product.info ? `Facts: ${product.info}` : 'Facts: (none given; describe only what the name states)',
+    ...(product.reviews ? [`Buyer reviews (real, copied from buyers): ${product.reviews}`] : []),
     style?.trim() ? `Style: ${style.trim()}` : 'Style: a short, friendly recommendation in the language of the product name.',
   ].join('\n');
 }
@@ -209,7 +276,8 @@ async function chat(
   const response = await deps.fetch(`${options.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${options.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: options.model ?? 'auto', messages }),
+    // Extra fields first so they can never replace the model or the messages.
+    body: JSON.stringify({ ...options.extraBody, model: options.model ?? 'auto', messages }),
     signal: AbortSignal.timeout(120_000),
   });
   if (!response.ok) {
@@ -311,7 +379,31 @@ export async function publishText(token: string, text: string, deps: ThreadsDeps
   return published.id;
 }
 
+async function runReadyPost(options: ThreadsPostOptions, deps: ThreadsDeps): Promise<number> {
+  const file = options.postsFile!;
+  if (options.productsFile || options.link || options.prompt.trim()) {
+    throw new Error('--posts cannot be combined with --products, --link or --prompt');
+  }
+  if (!options.dryRun && !options.threadsToken) {
+    throw new Error('Set THREADS_ACCESS_TOKEN to a Threads user access token (or pass --dry-run to only preview).');
+  }
+  const posts = parsePosts(fs.readFileSync(file, 'utf8'));
+  const next = readNextIndex(file);
+  const text = posts[next % posts.length];
+  deps.log(`Post ${(next % posts.length) + 1}/${posts.length}\n`);
+  deps.log(text);
+  if (options.dryRun) {
+    deps.log(`\n(dry run: ${threadsLength(text)}/${THREADS_TEXT_LIMIT} characters, not posted)`);
+    return 0;
+  }
+  const id = await publishText(options.threadsToken!, text, deps);
+  deps.log(`\nPublished to Threads (media id ${id})`);
+  writeNextIndex(file, (next + 1) % posts.length);
+  return 0;
+}
+
 export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsDeps = defaultDeps): Promise<number> {
+  if (options.postsFile) return runReadyPost(options, deps);
   let { prompt, link } = options;
   let product: { file: string; next: number; total: number; item: Product } | undefined;
   if (options.productsFile) {
@@ -334,7 +426,16 @@ export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsD
     throw new Error('Set THREADS_ACCESS_TOKEN to a Threads user access token (or pass --dry-run to only generate).');
   }
   if (product) deps.log(`Product ${(product.next % product.total) + 1}/${product.total}: ${product.item.name}\n`);
-  const body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+  let body: string;
+  if (product?.item.post) {
+    body = product.item.post;
+    const length = threadsLength(composePost(body, link, disclosure));
+    if (length > THREADS_TEXT_LIMIT) {
+      throw new Error(`The written post for '${product.item.name}' is ${length} characters with the disclosure and link, over the Threads limit of ${THREADS_TEXT_LIMIT}. Nothing was posted.`);
+    }
+  } else {
+    body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+  }
   const text = composePost(body, link, disclosure);
   deps.log(text);
   if (options.dryRun) {

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from './index.js';
 import {
-  THREADS_API, composePost, generatePost, parseCsv, parseProducts, publishText, readNextIndex,
+  THREADS_API, composePost, generatePost, parseCsv, parsePosts, parseProducts, publishText, readNextIndex,
   runThreadsPost, threadsLength, type ThreadsDeps,
 } from './threads.js';
 
@@ -295,5 +295,139 @@ describe('pasted secrets', () => {
       vi.unstubAllGlobals();
     }
     expect(auth).toBe('Bearer gsk_key');
+  });
+});
+
+describe('ready-written posts (--posts)', () => {
+  function postsFile(body = 'text\n"첫 번째 글\n\n두 줄째"\n두 번째 글\n'): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-posts-'));
+    const file = path.join(dir, 'posts.csv');
+    fs.writeFileSync(file, body);
+    return file;
+  }
+
+  it('parses multi-line quoted posts and rejects links, empties and over-long posts', () => {
+    expect(parsePosts('text\n"a\n\nb"\nc\n')).toEqual(['a\n\nb', 'c']);
+    expect(() => parsePosts('body\nx')).toThrow(/'text' column/);
+    expect(() => parsePosts('text\n')).toThrow(/no posts/);
+    expect(() => parsePosts('text\nsee https://x.example')).toThrow(/contains a link/);
+    expect(() => parsePosts(`text\n${'가'.repeat(501)}`)).toThrow(/over the Threads limit/);
+  });
+
+  it('posts verbatim without calling the model, and rotates only after publishing', async () => {
+    const file = postsFile();
+    const preview = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, postsFile: file }, preview);
+    expect(preview.calls).toHaveLength(0);
+    expect(preview.lines.join('\n')).toContain('첫 번째 글\n\n두 줄째');
+    expect(readNextIndex(file)).toBe(0);
+
+    for (const [expected, next] of [['첫 번째 글\n\n두 줄째', 1], ['두 번째 글', 0]] as const) {
+      const run = deps(threadsHandler([]));
+      await runThreadsPost({ ...base, prompt: '', threadsToken: token, postsFile: file }, run);
+      expect(run.calls.some(c => c.url.host === 'localhost:3001')).toBe(false);
+      const create = run.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+      expect(new URLSearchParams(String(create.init.body)).get('text')).toBe(expected);
+      expect(readNextIndex(file)).toBe(next);
+    }
+  });
+
+  it('refuses to mix --posts with generation options', async () => {
+    const file = postsFile();
+    await expect(runThreadsPost({ ...base, dryRun: true, postsFile: file }, deps(threadsHandler([]))))
+      .rejects.toThrow(/cannot be combined/);
+  });
+
+  it('needs no API key from the CLI', async () => {
+    vi.stubEnv('FREELLMAPI_API_KEY', '');
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await expect(main(['threads-post', '--posts', postsFile(), '--dry-run'])).resolves.toBe(0);
+  });
+});
+
+describe('readable formatting', () => {
+  it('asks the model for short, casual, human-sounding lines', async () => {
+    const d = deps(() => chatReply('ok'));
+    await generatePost(base, d);
+    const system = JSON.parse(String(d.calls[0].init.body)).messages[0].content as string;
+    expect(system).toMatch(/line break between thoughts/);
+    expect(system).toMatch(/real person posting casually/);
+    expect(system).toMatch(/hashtags/);
+  });
+});
+
+describe('buyer reviews', () => {
+  it('reads an optional reviews column and passes it as attributed buyer reviews', async () => {
+    expect(parseProducts('name,link,info\nA,https://x.example/a,f')[0].reviews).toBeUndefined();
+    const [product] = parseProducts('name,link,info,reviews\nA,https://x.example/a,f,"따뜻해요, 세탁해도 보풀 없음"');
+    expect(product.reviews).toBe('따뜻해요, 세탁해도 보풀 없음');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-reviews-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info,reviews\n담요,https://link.coupang.com/a/1,극세사,"생각보다 두꺼움, 보풀 적음"\n');
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, d);
+    const body = JSON.parse(String(d.calls[0].init.body));
+    expect(body.messages[1].content).toContain('Buyer reviews (real, copied from buyers): 생각보다 두꺼움, 보풀 적음');
+    expect(body.messages[0].content).toMatch(/always attribute it to buyers/);
+    expect(body.messages[0].content).toMatch(/never claim to have used the product/);
+  });
+});
+
+describe('--extra-body', () => {
+  it('merges provider fields into the chat request without overriding model or messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: string, init: RequestInit = {}) => {
+      const body = JSON.parse(String(init.body));
+      expect(body.max_completion_tokens).toBe(800);
+      expect(body.reasoning_effort).toBe('none');
+      expect(body.model).toBe('qwen/qwen3.8-27b');
+      expect(Array.isArray(body.messages)).toBe(true);
+      return chatReply('짧은 소개');
+    }));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await main(['threads-post', '--url', 'https://api.groq.com/openai/v1', '--api-key', 'k', '--model', 'qwen/qwen3.8-27b',
+        '--extra-body', '{"max_completion_tokens":800,"reasoning_effort":"none","model":"evil","messages":[]}',
+        '--prompt', 'x', '--dry-run']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects anything but a JSON object', async () => {
+    await expect(main(['threads-post', '--api-key', 'k', '--extra-body', '[1]', '--prompt', 'x', '--dry-run'])).rejects.toThrow(/JSON object/);
+    await expect(main(['threads-post', '--api-key', 'k', '--extra-body', 'nope', '--prompt', 'x', '--dry-run'])).rejects.toThrow(/JSON object/);
+  });
+});
+
+describe('ready-written product posts (post column)', () => {
+  it('uses the written body verbatim with the disclosure and link, without calling the model', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-written-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info,post\n담요,https://link.coupang.com/a/1,극세사,"소파에 하나 두면\n\n겨울이 좀 버틸 만해짐"\n텀블러,https://link.coupang.com/a/2,보온,\n');
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', threadsToken: token, productsFile: file, disclosure }, d);
+    expect(d.calls.some(c => c.url.host === 'localhost:3001')).toBe(false);
+    const create = d.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+    expect(new URLSearchParams(String(create.init.body)).get('text'))
+      .toBe(`${disclosure}\n\n소파에 하나 두면\n\n겨울이 좀 버틸 만해짐\n\nhttps://link.coupang.com/a/1`);
+    expect(readNextIndex(file)).toBe(1);
+
+    // A row with an empty post falls back to generation.
+    const next = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, next);
+    expect(next.calls[0].url.host).toBe('localhost:3001');
+  });
+
+  it('rejects a written post that contains a link or is too long', () => {
+    expect(() => parseProducts('name,link,info,post\nA,https://x.example/a,f,see https://y.example')).toThrow(/must not contain a link/);
+  });
+
+  it('refuses an over-long written post', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-long-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, `name,link,info,post\nA,https://x.example/a,f,${'가'.repeat(480)}\n`);
+    await expect(runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, deps(threadsHandler([]))))
+      .rejects.toThrow(/over the Threads limit/);
   });
 });

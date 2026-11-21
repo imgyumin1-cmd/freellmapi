@@ -12,7 +12,7 @@ import { getTool, tools } from './tools.js';
 import { resolveLaunchModel, type ResolvedModel } from './models.js';
 import { DOCTOR_TOOLS, diagnose, exitCodeFor, formatReport, type ToolReport } from './doctor.js';
 import { keysHelp, runKeys, type KeyCommandOptions } from './keys.js';
-import { runThreadsPost, threadsHelp } from './threads.js';
+import { parseExtraBody, runThreadsPost, threadsHelp } from './threads.js';
 import type { CatalogModel, GenerateContext } from './types.js';
 
 interface CliOptions extends KeyCommandOptions {
@@ -23,6 +23,8 @@ interface CliOptions extends KeyCommandOptions {
   link?: string;
   disclosure?: string;
   products?: string;
+  posts?: string;
+  extraBody?: string;
 }
 
 function rootUrl(url: string): string {
@@ -89,6 +91,7 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       || flag === '--model' || flag === '--timeout'
       || flag === '--token' || flag === '--key' || flag === '--id'
       || flag === '--prompt' || flag === '--link' || flag === '--disclosure' || flag === '--products'
+      || flag === '--posts' || flag === '--extra-body'
     ) {
       if (inline === undefined) index += 1;
       if (!value || (inline === undefined && value.startsWith('-'))) {
@@ -104,6 +107,8 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       else if (flag === '--link') options.link = value;
       else if (flag === '--disclosure') options.disclosure = value;
       else if (flag === '--products') options.products = value;
+      else if (flag === '--posts') options.posts = value;
+      else if (flag === '--extra-body') options.extraBody = value;
       else if (flag === '--id') {
         if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
           throw new Error('--id must be a positive integer');
@@ -480,7 +485,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (command === 'keys' && ['--api-key', '--profile', '--model'].includes(flag)) {
       throw new Error(`${flag} is not supported by keys; use keys --help for available options`);
     }
-    if (command !== 'threads-post' && ['--prompt', '--link', '--disclosure', '--products'].includes(flag)) {
+    if (command !== 'threads-post' && ['--prompt', '--link', '--disclosure', '--products', '--posts', '--extra-body'].includes(flag)) {
       throw new Error(`${flag} is only supported by threads-post`);
     }
   }
@@ -497,7 +502,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       gatewayUrl: rootUrl(options.url),
       // Trimmed: a key pasted into a CI secret often ends in a newline, which
       // makes the Authorization header invalid.
-      apiKey: (options.apiKey ?? await promptForKey()).trim(),
+      // Ready-written posts make no model call, so they need no API key.
+      apiKey: options.posts ? '' : (options.apiKey ?? await promptForKey()).trim(),
       prompt: options.prompt ?? '',
       model: options.model,
       threadsToken: process.env.THREADS_ACCESS_TOKEN?.trim() || undefined,
@@ -505,6 +511,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       link: options.link,
       disclosure: options.disclosure,
       productsFile: options.products,
+      postsFile: options.posts,
+      extraBody: parseExtraBody(options.extraBody),
     });
   }
   if (command === 'list') {
