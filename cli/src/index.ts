@@ -12,12 +12,14 @@ import { getTool, tools } from './tools.js';
 import { resolveLaunchModel, type ResolvedModel } from './models.js';
 import { DOCTOR_TOOLS, diagnose, exitCodeFor, formatReport, type ToolReport } from './doctor.js';
 import { keysHelp, runKeys, type KeyCommandOptions } from './keys.js';
+import { runThreadsPost, threadsHelp } from './threads.js';
 import type { CatalogModel, GenerateContext } from './types.js';
 
 interface CliOptions extends KeyCommandOptions {
   apiKey?: string;
   profile: string;
   model?: string;
+  prompt?: string;
 }
 
 function rootUrl(url: string): string {
@@ -83,6 +85,7 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       flag === '--url' || flag === '--api-key' || flag === '--profile'
       || flag === '--model' || flag === '--timeout'
       || flag === '--token' || flag === '--key' || flag === '--id'
+      || flag === '--prompt'
     ) {
       if (inline === undefined) index += 1;
       if (!value || (inline === undefined && value.startsWith('-'))) {
@@ -94,6 +97,7 @@ export function parseArgs(argv: string[]): { command?: string; options: CliOptio
       else if (flag === '--timeout') options.timeoutMs = parseTimeout(value);
       else if (flag === '--token') options.token = value;
       else if (flag === '--key') options.key = value;
+      else if (flag === '--prompt') options.prompt = value;
       else if (flag === '--id') {
         if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
           throw new Error('--id must be a positive integer');
@@ -275,6 +279,7 @@ function help(): string {
     '  launch-codex      Run Codex CLI with provider overrides and injected credentials',
     '  list              List supported coding agents',
     '  keys              Add, list, remove, or test provider keys (keys --help)',
+    '  threads-post      Generate a post and publish it to Threads (threads-post --help)',
     '',
     'Environment:',
     '  FREELLMAPI_URL, FREELLMAPI_API_KEY, FREELLMAPI_DASHBOARD_TOKEN (keys only)',
@@ -457,7 +462,8 @@ async function runDoctor(options: CliOptions): Promise<number> {
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const { command, options } = parseArgs(argv);
   if (!command || command === 'help' || argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(`${command === 'keys' ? keysHelp() : help()}\n`);
+    const text = command === 'keys' ? keysHelp() : command === 'threads-post' ? threadsHelp() : help();
+    process.stdout.write(`${text}\n`);
     return 0;
   }
   for (const arg of argv) {
@@ -468,6 +474,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (command === 'keys' && ['--api-key', '--profile', '--model'].includes(flag)) {
       throw new Error(`${flag} is not supported by keys; use keys --help for available options`);
     }
+    if (command !== 'threads-post' && flag === '--prompt') {
+      throw new Error('--prompt is only supported by threads-post');
+    }
   }
   if (command === 'keys') return runKeys(options, () => promptForKey(true));
   // `doctor` and `keys` take positional arguments. Every other
@@ -476,6 +485,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   // where it used to be an error.
   if (command !== 'doctor' && options.args.length) {
     throw new Error(`Unknown option: ${options.args[0]}`);
+  }
+  if (command === 'threads-post') {
+    return runThreadsPost({
+      gatewayUrl: rootUrl(options.url),
+      apiKey: options.apiKey ?? await promptForKey(),
+      prompt: options.prompt ?? '',
+      model: options.model,
+      threadsToken: process.env.THREADS_ACCESS_TOKEN?.trim() || undefined,
+      dryRun: options.dryRun,
+    });
   }
   if (command === 'list') {
     for (const tool of tools) {

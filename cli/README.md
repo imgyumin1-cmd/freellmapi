@@ -40,6 +40,7 @@ dashboard (or the tray popover in the desktop app).
 | `launch-codex` | Run Codex the same way |
 | `list` | Print the supported tools and their base URLs |
 | `keys` | Add, list, remove, or test provider keys (`keys --help`) |
+| `threads-post` | Generate a post with the gateway and publish it to Threads (`threads-post --help`) |
 
 ## Options
 
@@ -52,6 +53,38 @@ dashboard (or the tray popover in the desktop app).
 | `--dry-run` | Print the diff and write nothing |
 
 `FREELLMAPI_URL` and `FREELLMAPI_API_KEY` work in place of `--url` / `--api-key`.
+
+## Threads auto-post
+
+`threads-post` asks the gateway for a post, then publishes it to your own Threads
+profile through the official Threads API.
+
+```bash
+export FREELLMAPI_API_KEY=...        # unified gateway key
+export THREADS_ACCESS_TOKEN=...      # Threads user token: threads_basic + threads_content_publish
+freellmapi threads-post --prompt "Write a short tip about home coffee brewing" --dry-run
+freellmapi threads-post --prompt "Write a short tip about home coffee brewing"
+```
+
+- `--dry-run` prints the post without publishing it.
+- Threads caps text posts at 500 characters (emojis count as their UTF-8 bytes).
+  A longer post goes back to the model once to shorten; if it is still too long,
+  nothing is posted.
+- Before posting, the command checks your publishing quota (250 API posts per
+  rolling 24 hours). After creating the post it waits about 30 seconds and confirms
+  the post is ready before publishing it, as Meta's docs recommend.
+- Long-lived Threads tokens expire after 60 days. Refresh one before then with
+  `GET https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=...`.
+
+To post on a schedule, run it from cron on the machine where the gateway runs.
+For example, every day at 09:00:
+
+```cron
+0 9 * * * FREELLMAPI_API_KEY=... THREADS_ACCESS_TOKEN=... npx freellmapi threads-post --prompt "..." >> ~/threads-post.log 2>&1
+```
+
+Sources: Meta Threads API docs (posts, overview, troubleshooting, long-lived tokens),
+checked 2026-11-21.
 
 ## Provider keys
 
