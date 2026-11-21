@@ -495,7 +495,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (command === 'threads-post') {
     return runThreadsPost({
       gatewayUrl: rootUrl(options.url),
-      apiKey: options.apiKey ?? await promptForKey(),
+      // Trimmed: a key pasted into a CI secret often ends in a newline, which
+      // makes the Authorization header invalid.
+      apiKey: (options.apiKey ?? await promptForKey()).trim(),
       prompt: options.prompt ?? '',
       model: options.model,
       threadsToken: process.env.THREADS_ACCESS_TOKEN?.trim() || undefined,
