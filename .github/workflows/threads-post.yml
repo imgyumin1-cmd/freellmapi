@@ -59,6 +59,7 @@ jobs:
           FREELLMAPI_API_KEY: ${{ secrets.LLM_API_KEY }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
           DISCLOSURE: ${{ vars.THREADS_DISCLOSURE }}
+          DISCLOSURE_END: ${{ vars.THREADS_DISCLOSURE_END }}
           STYLE: ${{ vars.THREADS_STYLE }}
           # Groq's OpenAI-compatible endpoint and a model on its free plan
           # (console.groq.com/docs/openai and /docs/rate-limits, checked 2026-11-21).
@@ -75,6 +76,9 @@ jobs:
             LLM_EXTRA_BODY='{"max_completion_tokens":800,"reasoning_effort":"none"}'
           fi
           if [ -n "$LLM_EXTRA_BODY" ]; then args+=(--extra-body "$LLM_EXTRA_BODY"); fi
+          # Optional full wording after the link. The opening DISCLOSURE stays
+          # mandatory: the FTC guideline wants it in the first part of the post.
+          if [ -n "$DISCLOSURE_END" ]; then args+=(--disclosure-end "$DISCLOSURE_END"); fi
           if [ -n "$STYLE" ]; then args+=(--prompt "$STYLE"); fi
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           node cli/dist/index.js "${args[@]}"

@@ -47,6 +47,9 @@ export interface ThreadsPostOptions {
   productsFile?: string;
   /** CSV of ready-written posts (header: text); one per run, posted verbatim. */
   postsFile?: string;
+  /** Optional second disclosure after the link (e.g. a programme's full
+   *  wording). Never replaces `disclosure`, which must open the post. */
+  disclosureEnd?: string;
   /** Extra provider-specific request fields (e.g. max_completion_tokens). */
   extraBody?: Record<string, unknown>;
 }
@@ -94,6 +97,9 @@ export function threadsHelp(): string {
     'ready-written body used as is instead of generating one) and posts the next',
     'product each run. Progress is kept in FILE.csv.state and only advances after',
     'a successful publish (never on --dry-run). --prompt then sets tone/style.',
+    '--disclosure-end TEXT adds a second disclosure after the link (for example an',
+    'affiliate programme\'s full wording). It never replaces --disclosure, which',
+    'must open the post: Korea\'s FTC guideline requires the first part.',
     '--extra-body JSON adds provider-specific request fields, e.g.',
     '  \'{"max_completion_tokens":800}\' for a provider with a small output limit.',
     '--posts reads a CSV with a header row text and publishes the next post as',
@@ -140,14 +146,18 @@ function systemPrompt(limit: number, affiliate: boolean): string {
 
 const URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.\S+/gi;
 
-/** Disclosure first (so it is seen), body, link last. */
-export function composePost(body: string, link?: string, disclosure?: string): string {
-  return [disclosure?.trim(), body.trim(), link?.trim()].filter(Boolean).join('\n\n');
+/** Disclosure first (so it is seen), body, link, then an optional closing
+ *  disclosure. Korea's FTC endorsement guideline (예규 제499호, in force
+ *  2026-06-01, law.go.kr, checked 2026-11-21) requires text posts to carry the
+ *  disclosure "in the title or first part", so the closing one can only ever be
+ *  in addition to the opening one, never instead of it. */
+export function composePost(body: string, link?: string, disclosure?: string, disclosureEnd?: string): string {
+  return [disclosure?.trim(), body.trim(), link?.trim(), disclosureEnd?.trim()].filter(Boolean).join('\n\n');
 }
 
 /** Characters the CLI adds around the generated body. */
-export function reservedLength(link?: string, disclosure?: string): number {
-  const fixed = composePost('', link, disclosure);
+export function reservedLength(link?: string, disclosure?: string, disclosureEnd?: string): number {
+  const fixed = composePost('', link, disclosure, disclosureEnd);
   return fixed ? threadsLength(fixed) + 2 : 0;
 }
 
@@ -419,6 +429,7 @@ export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsD
   }
   if (link) link = validateLink(link);
   const disclosure = options.disclosure?.trim() || undefined;
+  const disclosureEnd = options.disclosureEnd?.trim() || undefined;
   if (link && !disclosure) {
     throw new Error('A post with a link must carry an advertising disclosure: pass --disclosure TEXT.');
   }
@@ -429,14 +440,14 @@ export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsD
   let body: string;
   if (product?.item.post) {
     body = product.item.post;
-    const length = threadsLength(composePost(body, link, disclosure));
+    const length = threadsLength(composePost(body, link, disclosure, disclosureEnd));
     if (length > THREADS_TEXT_LIMIT) {
       throw new Error(`The written post for '${product.item.name}' is ${length} characters with the disclosure and link, over the Threads limit of ${THREADS_TEXT_LIMIT}. Nothing was posted.`);
     }
   } else {
-    body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+    body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure, disclosureEnd), Boolean(link));
   }
-  const text = composePost(body, link, disclosure);
+  const text = composePost(body, link, disclosure, disclosureEnd);
   deps.log(text);
   if (options.dryRun) {
     deps.log(`\n(dry run: ${threadsLength(text)}/${THREADS_TEXT_LIMIT} characters, not posted)`);

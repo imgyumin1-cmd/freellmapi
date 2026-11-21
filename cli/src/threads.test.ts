@@ -431,3 +431,29 @@ describe('ready-written product posts (post column)', () => {
       .rejects.toThrow(/over the Threads limit/);
   });
 });
+
+describe('closing disclosure (--disclosure-end)', () => {
+  const full = '이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.';
+  const short = '[광고] 쿠팡 파트너스 수수료를 받는 글이에요';
+
+  it('keeps the short disclosure first and puts the full wording after the link', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-end-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info,post\n담요,https://link.coupang.com/a/1,극세사,본문\n');
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', threadsToken: token, productsFile: file, disclosure: short, disclosureEnd: full }, d);
+    const create = d.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+    expect(new URLSearchParams(String(create.init.body)).get('text'))
+      .toBe(`${short}\n\n본문\n\nhttps://link.coupang.com/a/1\n\n${full}`);
+  });
+
+  it('never lets the closing disclosure stand in for the opening one', async () => {
+    await expect(runThreadsPost({ ...base, dryRun: true, link: 'https://link.coupang.com/a/1', disclosureEnd: full }, deps(threadsHandler([]))))
+      .rejects.toThrow(/advertising disclosure/);
+  });
+
+  it('counts both disclosures against the 500-character limit', () => {
+    expect(threadsLength(composePost('x', 'https://a.example/b', short, full)))
+      .toBe(threadsLength(`${short}\n\nx\n\nhttps://a.example/b\n\n${full}`));
+  });
+});
