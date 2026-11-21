@@ -40,6 +40,7 @@ dashboard (or the tray popover in the desktop app).
 | `launch-codex` | Run Codex the same way |
 | `list` | Print the supported tools and their base URLs |
 | `keys` | Add, list, remove, or test provider keys (`keys --help`) |
+| `threads-post` | Generate a post with the gateway and publish it to Threads (`threads-post --help`) |
 
 ## Options
 
@@ -52,6 +53,72 @@ dashboard (or the tray popover in the desktop app).
 | `--dry-run` | Print the diff and write nothing |
 
 `FREELLMAPI_URL` and `FREELLMAPI_API_KEY` work in place of `--url` / `--api-key`.
+
+## Threads auto-post
+
+`threads-post` asks the gateway for a post, then publishes it to your own Threads
+profile through the official Threads API.
+
+```bash
+export FREELLMAPI_API_KEY=...        # unified gateway key
+export THREADS_ACCESS_TOKEN=...      # Threads user token: threads_basic + threads_content_publish
+freellmapi threads-post --prompt "Write a short tip about home coffee brewing" --dry-run
+freellmapi threads-post --prompt "Write a short tip about home coffee brewing"
+```
+
+- `--dry-run` prints the post without publishing it.
+- Threads caps text posts at 500 characters (emojis count as their UTF-8 bytes).
+  A longer post goes back to the model once to shorten; if it is still too long,
+  nothing is posted.
+- Before posting, the command checks your publishing quota (250 API posts per
+  rolling 24 hours). After creating the post it waits about 30 seconds and confirms
+  the post is ready before publishing it, as Meta's docs recommend.
+- Long-lived Threads tokens expire after 60 days. Refresh one before then with
+  `GET https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=...`.
+
+### Affiliate links and a product list
+
+`--link URL` adds a link as the post's last line. `--disclosure TEXT` adds an
+advertising disclosure as the first line, and any post with a link requires it.
+The CLI adds both itself, so the model cannot leave them out or change them. For
+affiliate posts the model is told to use only the facts you give it and never to
+invent a personal experience, review, price or discount. Any URL the model writes
+is removed, so your link is the only one in the post (Threads previews the first
+URL in a post).
+
+```bash
+freellmapi threads-post --prompt "Introduce cordless vacuum A: 1.2 kg, 40 min battery" \
+  --link "https://link.coupang.com/a/xxxx" \
+  --disclosure "<the disclosure wording your affiliate programme requires>"
+```
+
+`--products FILE.csv` posts one product per run, in order. The CSV needs a
+`name,link,info` header row. `info` holds the facts the post may use:
+
+```csv
+name,link,info
+Cordless vacuum A,https://link.coupang.com/a/xxxx,"1.2 kg, 40 min battery"
+Tumbler B,https://link.coupang.com/a/yyyy,keeps drinks hot for 12 hours
+```
+
+```bash
+freellmapi threads-post --products products.csv --disclosure "..." --prompt "friendly, in Korean"
+```
+
+The next product to post is stored in `FILE.csv.state`. It moves forward only after
+a successful publish, never on `--dry-run`, and starts again from the top after the
+last row. Check your own disclosure obligations and your affiliate programme's terms
+before you post.
+
+To post on a schedule, run it from cron on the machine where the gateway runs.
+For example, every day at 09:00:
+
+```cron
+0 9 * * * FREELLMAPI_API_KEY=... THREADS_ACCESS_TOKEN=... npx freellmapi threads-post --prompt "..." >> ~/threads-post.log 2>&1
+```
+
+Sources: Meta Threads API docs (posts, overview, troubleshooting, long-lived tokens),
+checked 2026-11-21.
 
 ## Provider keys
 

@@ -1,0 +1,82 @@
+name: Threads auto-post
+
+# Posts the next product from threads/products.csv to Threads once a day.
+# Setup guide: threads/README.md
+#
+# Scheduled runs only fire from the default branch, and GitHub may start them
+# some minutes late.
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 03:00 UTC = 12:00 KST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview only: generate the post but do not publish it'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # commit threads/products.csv.state (the rotation position)
+
+concurrency:
+  group: threads-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'npm'
+
+      - name: Install and build the CLI
+        run: |
+          npm ci -w cli --no-audit --no-fund
+          npm run build -w cli
+
+      - name: Check setup
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          DISCLOSURE: ${{ vars.THREADS_DISCLOSURE }}
+        run: |
+          missing=0
+          [ -f threads/products.csv ] || { echo "::error::threads/products.csv is missing. Copy threads/products.example.csv and fill in your products."; missing=1; }
+          if grep -q REPLACE_ME threads/products.csv 2>/dev/null; then echo "::error::threads/products.csv still has example REPLACE_ME links. Put your real affiliate links in."; missing=1; fi
+          [ -n "$LLM_API_KEY" ] || { echo "::error::Add the LLM_API_KEY repository secret (your Groq API key)."; missing=1; }
+          [ -n "$THREADS_ACCESS_TOKEN" ] || { echo "::error::Add the THREADS_ACCESS_TOKEN repository secret (run the 'Threads token' workflow)."; missing=1; }
+          [ -n "$DISCLOSURE" ] || { echo "::error::Add the THREADS_DISCLOSURE repository variable (your affiliate disclosure text)."; missing=1; }
+          exit $missing
+
+      - name: Generate and post
+        env:
+          FREELLMAPI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          DISCLOSURE: ${{ vars.THREADS_DISCLOSURE }}
+          STYLE: ${{ vars.THREADS_STYLE }}
+          # Groq's OpenAI-compatible endpoint and a model on its free plan
+          # (console.groq.com/docs/openai and /docs/rate-limits, checked 2026-11-21).
+          LLM_URL: ${{ vars.LLM_URL || 'https://api.groq.com/openai/v1' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'openai/gpt-oss-120b' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(threads-post --url "$LLM_URL" --model "$LLM_MODEL" --products threads/products.csv --disclosure "$DISCLOSURE")
+          if [ -n "$STYLE" ]; then args+=(--prompt "$STYLE"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node cli/dist/index.js "${args[@]}"
+
+      - name: Save rotation position
+        if: inputs.dry_run != true
+        run: |
+          git add threads/products.csv.state
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'threads: advance product rotation [skip ci]'
+          git push

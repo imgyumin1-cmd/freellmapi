@@ -46,6 +46,8 @@
     "dist/models.d.ts",
     "dist/tools.js",
     "dist/tools.d.ts",
+    "dist/threads.js",
+    "dist/threads.d.ts",
     "dist/types.js",
     "dist/types.d.ts",
     "tools.json"
