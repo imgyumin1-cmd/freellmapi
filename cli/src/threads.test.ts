@@ -259,3 +259,23 @@ describe('CSV products', () => {
     await expect(main(['list', '--link', 'https://x.example'])).rejects.toThrow(/--link is only supported/);
   });
 });
+
+describe('direct OpenAI-compatible provider (GitHub Actions setup)', () => {
+  it('sends chat to <base>/chat/completions for a base URL ending in /openai/v1', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+      seen.push(input);
+      expect(new Headers(init.headers).get('Authorization')).toBe('Bearer provider-key');
+      expect(JSON.parse(String(init.body)).model).toBe('openai/gpt-oss-120b');
+      return chatReply('짧은 소개');
+    }));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await main(['threads-post', '--url', 'https://api.groq.com/openai/v1', '--api-key', 'provider-key',
+        '--model', 'openai/gpt-oss-120b', '--prompt', 'x', '--dry-run']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen).toEqual(['https://api.groq.com/openai/v1/chat/completions']);
+  });
+});

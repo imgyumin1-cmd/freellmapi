@@ -1,0 +1,72 @@
+name: Threads token
+
+# Gets and refreshes the Threads access token and saves it straight into the
+# THREADS_ACCESS_TOKEN repository secret, so the token is never shown or pasted
+# anywhere. Setup guide: threads/README.md
+#
+# Endpoints from Meta's Threads docs, checked 2026-11-21:
+#   developers.facebook.com/docs/threads/get-started/get-access-tokens-and-permissions
+#   developers.facebook.com/docs/threads/get-started/long-lived-tokens
+# Long-lived tokens last 60 days and can be refreshed once they are 24 hours
+# old, so the monthly schedule below keeps the token alive.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'exchange = first setup with an authorization code; refresh = extend the saved token'
+        type: choice
+        options: [exchange, refresh]
+        default: exchange
+      code:
+        description: 'Authorization code from the redirect URL (exchange only; single use, valid 1 hour)'
+        type: string
+        required: false
+  schedule:
+    - cron: '17 1 1 * *' # monthly refresh
+
+permissions:
+  contents: read
+
+jobs:
+  token:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Get or refresh the token
+        env:
+          MODE: ${{ inputs.mode || 'refresh' }}
+          CODE: ${{ inputs.code }}
+          APP_ID: ${{ secrets.THREADS_APP_ID }}
+          APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
+          REDIRECT_URI: ${{ vars.THREADS_REDIRECT_URI || 'https://localhost/' }}
+          CURRENT_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECRETS_WRITE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::Add the SECRETS_WRITE_TOKEN secret (a fine-grained token with Secrets: read and write on this repository)."; exit 1; }
+          api=https://graph.threads.com
+
+          if [ "$MODE" = "exchange" ]; then
+            [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || { echo "::error::Add the THREADS_APP_ID and THREADS_APP_SECRET secrets."; exit 1; }
+            code="${CODE%%#*}" # the redirect appends '#_', which is not part of the code
+            [ -n "$code" ] || { echo "::error::Paste the authorization code into the 'code' input."; exit 1; }
+            short=$(curl -sS --fail-with-body -X POST "$api/oauth/access_token" \
+              --form-string "client_id=$APP_ID" --form-string "client_secret=$APP_SECRET" \
+              --form-string grant_type=authorization_code --form-string "redirect_uri=$REDIRECT_URI" \
+              --form-string "code=$code" | jq -er .access_token) || { echo "::error::Code exchange failed. Codes are single use and expire after 1 hour, and redirect_uri must match the app settings exactly."; exit 1; }
+            echo "::add-mask::$short"
+            token=$(curl -sS --fail-with-body -G "$api/access_token" \
+              --data-urlencode grant_type=th_exchange_token --data-urlencode "client_secret=$APP_SECRET" \
+              --data-urlencode "access_token=$short" | jq -er .access_token) || { echo "::error::Long-lived token exchange failed."; exit 1; }
+          else
+            [ -n "$CURRENT_TOKEN" ] || { echo "::error::No THREADS_ACCESS_TOKEN saved yet. Run this workflow with mode=exchange first."; exit 1; }
+            token=$(curl -sS --fail-with-body -G "$api/refresh_access_token" \
+              --data-urlencode grant_type=th_refresh_token \
+              --data-urlencode "access_token=$CURRENT_TOKEN" | jq -er .access_token) || { echo "::error::Refresh failed. A token can be refreshed only when it is at least 24 hours old and not yet expired; if it expired, run mode=exchange again."; exit 1; }
+          fi
+          echo "::add-mask::$token"
+
+          printf '%s' "$token" | gh secret set THREADS_ACCESS_TOKEN --repo "$REPO"
+          echo "Saved a long-lived Threads token (valid 60 days) to THREADS_ACCESS_TOKEN."
