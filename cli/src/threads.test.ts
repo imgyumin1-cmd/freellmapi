@@ -279,3 +279,21 @@ describe('direct OpenAI-compatible provider (GitHub Actions setup)', () => {
     expect(seen).toEqual(['https://api.groq.com/openai/v1/chat/completions']);
   });
 });
+
+describe('pasted secrets', () => {
+  it('trims a trailing newline from the API key before sending it', async () => {
+    let auth: string | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (_input: string, init: RequestInit = {}) => {
+      auth = new Headers(init.headers).get('Authorization');
+      return chatReply('짧은 소개');
+    }));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.stubEnv('FREELLMAPI_API_KEY', 'gsk_key\n');
+    try {
+      await main(['threads-post', '--url', 'https://api.groq.com/openai/v1', '--model', 'm', '--prompt', 'x', '--dry-run']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(auth).toBe('Bearer gsk_key');
+  });
+});

@@ -45,6 +45,13 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Secrets pasted on a phone often carry a trailing newline or spaces,
+          # which Meta rejects (e.g. "Invalid client_id"). None of these values
+          # can contain whitespace, so strip it.
+          trim() { printf '%s' "$1" | tr -d '[:space:]'; }
+          APP_ID=$(trim "$APP_ID"); APP_SECRET=$(trim "$APP_SECRET")
+          CURRENT_TOKEN=$(trim "$CURRENT_TOKEN"); GH_TOKEN=$(trim "$GH_TOKEN"); export GH_TOKEN
+          REDIRECT_URI=$(trim "$REDIRECT_URI")
           [ -n "$GH_TOKEN" ] || { echo "::error::Add the SECRETS_WRITE_TOKEN secret (a fine-grained token with Secrets: read and write on this repository)."; exit 1; }
           api=https://graph.threads.com
 
@@ -61,9 +68,10 @@ jobs:
 
           if [ "$MODE" = "exchange" ]; then
             [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || { echo "::error::Add the THREADS_APP_ID and THREADS_APP_SECRET secrets."; exit 1; }
+            [[ "$APP_ID" =~ ^[0-9]+$ ]] || { echo "::error::THREADS_APP_ID must be only the digits of the Threads App ID."; exit 1; }
             # Accept the bare code, "code=...", or the whole redirect URL; drop
             # whitespace a phone paste can add and the '#_' Threads appends.
-            code=$(printf '%s' "$CODE" | tr -d '[:space:]')
+            code=$(trim "$CODE")
             code="${code##*code=}"
             code="${code%%#*}"
             code="${code%%&*}"
