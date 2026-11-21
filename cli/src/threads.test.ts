@@ -399,3 +399,35 @@ describe('--extra-body', () => {
     await expect(main(['threads-post', '--api-key', 'k', '--extra-body', 'nope', '--prompt', 'x', '--dry-run'])).rejects.toThrow(/JSON object/);
   });
 });
+
+describe('ready-written product posts (post column)', () => {
+  it('uses the written body verbatim with the disclosure and link, without calling the model', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-written-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, 'name,link,info,post\n담요,https://link.coupang.com/a/1,극세사,"소파에 하나 두면\n\n겨울이 좀 버틸 만해짐"\n텀블러,https://link.coupang.com/a/2,보온,\n');
+    const d = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', threadsToken: token, productsFile: file, disclosure }, d);
+    expect(d.calls.some(c => c.url.host === 'localhost:3001')).toBe(false);
+    const create = d.calls.find(c => c.url.pathname === '/v1.0/me/threads')!;
+    expect(new URLSearchParams(String(create.init.body)).get('text'))
+      .toBe(`${disclosure}\n\n소파에 하나 두면\n\n겨울이 좀 버틸 만해짐\n\nhttps://link.coupang.com/a/1`);
+    expect(readNextIndex(file)).toBe(1);
+
+    // A row with an empty post falls back to generation.
+    const next = deps(threadsHandler([]));
+    await runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, next);
+    expect(next.calls[0].url.host).toBe('localhost:3001');
+  });
+
+  it('rejects a written post that contains a link or is too long', () => {
+    expect(() => parseProducts('name,link,info,post\nA,https://x.example/a,f,see https://y.example')).toThrow(/must not contain a link/);
+  });
+
+  it('refuses an over-long written post', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-long-'));
+    const file = path.join(dir, 'products.csv');
+    fs.writeFileSync(file, `name,link,info,post\nA,https://x.example/a,f,${'가'.repeat(480)}\n`);
+    await expect(runThreadsPost({ ...base, prompt: '', dryRun: true, productsFile: file, disclosure }, deps(threadsHandler([]))))
+      .rejects.toThrow(/over the Threads limit/);
+  });
+});

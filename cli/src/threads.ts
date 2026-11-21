@@ -57,6 +57,8 @@ export interface Product {
   info: string;
   /** Real buyer review excerpts the user copied; optional. */
   reviews?: string;
+  /** Ready-written post body; when set it is used as is, with no model call. */
+  post?: string;
 }
 
 export interface ThreadsDeps {
@@ -88,7 +90,8 @@ export function threadsHelp(): string {
     '--link appends a URL as the last line; --disclosure (required with any link)',
     'is placed as the first line. Both are added by the CLI, never by the model.',
     '--products reads a CSV with a header row name,link,info (optional reviews:',
-    'real buyer review excerpts, cited as what buyers say) and posts the next',
+    'real buyer review excerpts, cited as what buyers say; optional post: a',
+    'ready-written body used as is instead of generating one) and posts the next',
     'product each run. Progress is kept in FILE.csv.state and only advances after',
     'a successful publish (never on --dry-run). --prompt then sets tone/style.',
     '--extra-body JSON adds provider-specific request fields, e.g.',
@@ -190,12 +193,21 @@ export function parseProducts(text: string): Product[] {
   };
   const [nameAt, linkAt, infoAt] = [index('name'), index('link'), index('info')];
   const reviewsAt = columns.indexOf('reviews'); // optional column
+  const postAt = columns.indexOf('post'); // optional column
   const products = rows.map((cells, row) => {
     const name = cells[nameAt]?.trim() ?? '';
     if (!name) throw new Error(`Products CSV row ${row + 2} has no name`);
     const product: Product = { name, link: validateLink(cells[linkAt] ?? ''), info: cells[infoAt]?.trim() ?? '' };
     const reviews = reviewsAt < 0 ? '' : cells[reviewsAt]?.trim() ?? '';
     if (reviews) product.reviews = reviews;
+    const post = postAt < 0 ? '' : (cells[postAt] ?? '').replace(/\r\n/g, '\n').trim();
+    if (post) {
+      if (URL_PATTERN.test(post)) {
+        URL_PATTERN.lastIndex = 0;
+        throw new Error(`Products CSV row ${row + 2}: the post must not contain a link; the link column is added automatically`);
+      }
+      product.post = post;
+    }
     return product;
   });
   if (!products.length) throw new Error('Products CSV has no product rows');
@@ -414,7 +426,16 @@ export async function runThreadsPost(options: ThreadsPostOptions, deps: ThreadsD
     throw new Error('Set THREADS_ACCESS_TOKEN to a Threads user access token (or pass --dry-run to only generate).');
   }
   if (product) deps.log(`Product ${(product.next % product.total) + 1}/${product.total}: ${product.item.name}\n`);
-  const body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+  let body: string;
+  if (product?.item.post) {
+    body = product.item.post;
+    const length = threadsLength(composePost(body, link, disclosure));
+    if (length > THREADS_TEXT_LIMIT) {
+      throw new Error(`The written post for '${product.item.name}' is ${length} characters with the disclosure and link, over the Threads limit of ${THREADS_TEXT_LIMIT}. Nothing was posted.`);
+    }
+  } else {
+    body = await generatePost({ ...options, prompt }, deps, reservedLength(link, disclosure), Boolean(link));
+  }
   const text = composePost(body, link, disclosure);
   deps.log(text);
   if (options.dryRun) {
