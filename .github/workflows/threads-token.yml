@@ -48,23 +48,46 @@ jobs:
           [ -n "$GH_TOKEN" ] || { echo "::error::Add the SECRETS_WRITE_TOKEN secret (a fine-grained token with Secrets: read and write on this repository)."; exit 1; }
           api=https://graph.threads.com
 
+          # Sets $value to the response's access_token, or prints Meta's own
+          # error message (never a token: failures carry none) and exits.
+          take_token() {
+            value=$(jq -r '.access_token // empty' <<<"$1" 2>/dev/null || true)
+            if [ -z "$value" ]; then
+              reason=$(jq -r '.error.message // .error_message // .error // empty' <<<"$1" 2>/dev/null || true)
+              echo "::error::$2 Meta says: ${reason:-unexpected response}"
+              exit 1
+            fi
+          }
+
           if [ "$MODE" = "exchange" ]; then
             [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || { echo "::error::Add the THREADS_APP_ID and THREADS_APP_SECRET secrets."; exit 1; }
-            code="${CODE%%#*}" # the redirect appends '#_', which is not part of the code
+            # Accept the bare code, "code=...", or the whole redirect URL; drop
+            # whitespace a phone paste can add and the '#_' Threads appends.
+            code=$(printf '%s' "$CODE" | tr -d '[:space:]')
+            code="${code##*code=}"
+            code="${code%%#*}"
+            code="${code%%&*}"
             [ -n "$code" ] || { echo "::error::Paste the authorization code into the 'code' input."; exit 1; }
-            short=$(curl -sS --fail-with-body -X POST "$api/oauth/access_token" \
+            echo "Exchanging a ${#code}-character code with redirect_uri=$REDIRECT_URI and app id ${APP_ID:0:4}…"
+            resp=$(curl -sS -X POST "$api/oauth/access_token" \
               --form-string "client_id=$APP_ID" --form-string "client_secret=$APP_SECRET" \
               --form-string grant_type=authorization_code --form-string "redirect_uri=$REDIRECT_URI" \
-              --form-string "code=$code" | jq -er .access_token) || { echo "::error::Code exchange failed. Codes are single use and expire after 1 hour, and redirect_uri must match the app settings exactly."; exit 1; }
+              --form-string "code=$code")
+            take_token "$resp" "Code exchange failed. Codes are single use and expire after 1 hour, redirect_uri must match the app settings exactly, and the app id/secret must be the Threads ones."
+            short=$value
             echo "::add-mask::$short"
-            token=$(curl -sS --fail-with-body -G "$api/access_token" \
+            resp=$(curl -sS -G "$api/access_token" \
               --data-urlencode grant_type=th_exchange_token --data-urlencode "client_secret=$APP_SECRET" \
-              --data-urlencode "access_token=$short" | jq -er .access_token) || { echo "::error::Long-lived token exchange failed."; exit 1; }
+              --data-urlencode "access_token=$short")
+            take_token "$resp" "Long-lived token exchange failed."
+            token=$value
           else
             [ -n "$CURRENT_TOKEN" ] || { echo "::error::No THREADS_ACCESS_TOKEN saved yet. Run this workflow with mode=exchange first."; exit 1; }
-            token=$(curl -sS --fail-with-body -G "$api/refresh_access_token" \
+            resp=$(curl -sS -G "$api/refresh_access_token" \
               --data-urlencode grant_type=th_refresh_token \
-              --data-urlencode "access_token=$CURRENT_TOKEN" | jq -er .access_token) || { echo "::error::Refresh failed. A token can be refreshed only when it is at least 24 hours old and not yet expired; if it expired, run mode=exchange again."; exit 1; }
+              --data-urlencode "access_token=$CURRENT_TOKEN")
+            take_token "$resp" "Refresh failed. A token can be refreshed only when it is at least 24 hours old and not yet expired; if it expired, run mode=exchange again."
+            token=$value
           fi
           echo "::add-mask::$token"
 
