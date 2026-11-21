@@ -58,6 +58,9 @@ GitHub의 예약 실행은 **기본 브랜치(main)에 있는 워크플로만** 
 저장소 **Settings → Secrets and variables → Actions → Variables → New repository variable**
 - `THREADS_DISCLOSURE` (필수): 쿠팡 파트너스가 요구하는 문구. 파트너스 공지에서 최신 문구를 확인해 그대로 넣으세요.
   예) `이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.`
+- `THREADS_DISCLOSURE_END` (선택): 링크 **아래 맨 끝**에 붙는 문구. 쿠팡 정식 문구를 여기에 두고,
+  `THREADS_DISCLOSURE` 에는 `[광고] 쿠팡 파트너스 수수료를 받는 글이에요` 처럼 짧은 표시만 둘 수 있습니다.
+  공정위 「추천·보증 심사지침」(예규 제499호)은 글의 **제목 또는 첫 부분** 표시를 요구하므로 맨 앞 표시는 없앨 수 없습니다.
 - `THREADS_STYLE` (선택): 글 말투. 예) `친근한 말투, 한국어, 3~4문장`
 
 ## 6. 상품 목록
